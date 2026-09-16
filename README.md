@@ -93,9 +93,13 @@ pom.xml                                           Maven build, Spring Boot 3.3,
 2. Packages `beanstalk-app.jar` + `Procfile` into a uniquely-labeled ZIP
    (`v<run_number>-<short-sha>.zip`).
 3. Authenticates to AWS via **OIDC** (`aws-actions/configure-aws-credentials`
-   assuming `github-actions-beanstalk-lab-deploy`, trust-scoped to
-   `repo:Iradukunda54/beanstalk-lab:ref:refs/heads/main`) — no static AWS keys
-   stored in GitHub.
+   assuming `github-actions-beanstalk-lab-deploy`) — no static AWS keys stored
+   in GitHub. The role's trust policy pins the `sub` claim to this exact repo
+   and branch. Note: GitHub's OIDC token now embeds immutable owner/repo
+   database IDs in `sub`
+   (`repo:Iradukunda54@267279209/beanstalk-lab@1373431449:ref:refs/heads/main`)
+   rather than plain names — the trust condition matches that exact form, not
+   `repo:OWNER/REPO:ref:...`.
 4. Uploads the ZIP to S3.
 5. Creates a new Elastic Beanstalk application version from that S3 object.
 6. Updates the environment to the new version label and sets `APP_VERSION` as
@@ -108,8 +112,16 @@ Security/workflow hardening:
 - Third-party actions pinned to commit SHA, not floating tags.
 - `permissions: { id-token: write, contents: read }` — least privilege.
 - `concurrency` group prevents two overlapping deploys from racing each other.
-- The IAM deploy role's inline policy is scoped to this one S3 prefix and this
-  one Beanstalk application/environment — not `*`.
+- No long-lived AWS keys anywhere: the role is only assumable via OIDC from
+  this exact repo + branch (see the `sub` condition above).
+- The deploy role's own inline policy limits S3 access to this one artifact
+  prefix. Elastic Beanstalk permissions use the AWS-managed
+  `AdministratorAccess-AWSElasticBeanstalk` policy — `update-environment`
+  drives CloudFormation/EC2/Auto Scaling/ELB changes under the hood, and
+  hand-scoping every one of those actions (stack-specific `cloudformation:*`,
+  per-ASG `autoscaling:*`, etc.) is what AWS's own docs recommend against for
+  exactly this reason. It's still scoped to Elastic Beanstalk's own managed
+  policy, not `AdministratorAccess`.
 
 ## One-time AWS setup (already applied to this account, kept here for reference)
 
