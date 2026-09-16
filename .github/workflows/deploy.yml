@@ -1,0 +1,105 @@
+name: Build and Deploy to Elastic Beanstalk
+
+on:
+  push:
+    branches: [main]
+
+# Only one deploy in flight at a time; a newer push cancels a queued (not yet
+# running) older one instead of racing it.
+concurrency:
+  group: eb-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required for OIDC -> AWS role assumption
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  EB_APPLICATION_NAME: beanstalk-lab
+  EB_ENVIRONMENT_NAME: beanstalk-lab-env
+  S3_BUCKET: beanstalk-lab-artifacts-447558491229
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: corretto
+          java-version: "17"
+          cache: maven
+
+      - name: Compute version label
+        id: version
+        run: |
+          VERSION_LABEL="v${{ github.run_number }}-${GITHUB_SHA::7}"
+          echo "label=$VERSION_LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Build jar
+        run: mvn -B -DskipTests package
+
+      - name: Assemble source bundle
+        run: |
+          mkdir -p bundle
+          cp target/beanstalk-app.jar bundle/
+          cp Procfile bundle/
+          cd bundle
+          zip -r ../${{ steps.version.outputs.label }}.zip .
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload source bundle to S3
+        run: |
+          aws s3 cp "${{ steps.version.outputs.label }}.zip" \
+            "s3://${S3_BUCKET}/${EB_APPLICATION_NAME}/${{ steps.version.outputs.label }}.zip"
+
+      - name: Create Elastic Beanstalk application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "$EB_APPLICATION_NAME" \
+            --version-label "${{ steps.version.outputs.label }}" \
+            --description "Deployed from ${GITHUB_SHA} by GitHub Actions run ${{ github.run_number }}" \
+            --source-bundle S3Bucket="${S3_BUCKET}",S3Key="${EB_APPLICATION_NAME}/${{ steps.version.outputs.label }}.zip"
+
+      - name: Deploy new version to environment
+        run: |
+          aws elasticbeanstalk update-environment \
+            --application-name "$EB_APPLICATION_NAME" \
+            --environment-name "$EB_ENVIRONMENT_NAME" \
+            --version-label "${{ steps.version.outputs.label }}" \
+            --option-settings Namespace=aws:elasticbeanstalk:application:environment,OptionName=APP_VERSION,Value="${{ steps.version.outputs.label }}"
+
+      - name: Wait for environment to stabilize
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --application-name "$EB_APPLICATION_NAME" \
+            --environment-names "$EB_ENVIRONMENT_NAME"
+
+      - name: Verify deployment health
+        run: |
+          STATUS=$(aws elasticbeanstalk describe-environments \
+            --application-name "$EB_APPLICATION_NAME" \
+            --environment-names "$EB_ENVIRONMENT_NAME" \
+            --query 'Environments[0].Health' --output text)
+          VERSION=$(aws elasticbeanstalk describe-environments \
+            --application-name "$EB_APPLICATION_NAME" \
+            --environment-names "$EB_ENVIRONMENT_NAME" \
+            --query 'Environments[0].VersionLabel' --output text)
+          echo "Environment health: $STATUS, deployed version: $VERSION"
+          if [ "$STATUS" != "Green" ] && [ "$STATUS" != "Yellow" ]; then
+            echo "::error::Environment health is $STATUS after deployment"
+            exit 1
+          fi
+          if [ "$VERSION" != "${{ steps.version.outputs.label }}" ]; then
+            echo "::error::Expected version ${{ steps.version.outputs.label }} but environment reports $VERSION"
+            exit 1
+          fi
