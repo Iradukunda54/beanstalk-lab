@@ -23,7 +23,7 @@ public class AppController {
     @GetMapping("/")
     public Map<String, Object> home() {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("message", "updated successfully via Elastic Beanstalk");
+        body.put("message", "deployed successfully via Elastic Beanstalk");
         body.put("version", appVersion);
         body.put("timestamp", Instant.now().toString());
 
